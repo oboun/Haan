@@ -778,7 +778,9 @@ function openPasteAiDialog(noticeText = '') {
     els.pasteAiNotice.hidden = true;
   }
   els.pasteAiDialog.showModal();
-  els.pasteAiTextarea.focus();
+  if (!window.matchMedia('(pointer: coarse)').matches) {
+    els.pasteAiTextarea.focus();
+  }
 }
 
 function clearReceiptData() {
