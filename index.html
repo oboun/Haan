@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Haan — Interactive Receipt OCR &amp; Bill Splitter</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <!-- Top Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="brand">
+        <span class="brand-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/>
+            <path d="M8 7h8"/><path d="M8 11h8"/><path d="M8 15h5"/>
+          </svg>
+        </span>
+        <div>
+          <h1 class="brand-title">Haan</h1>
+          <p class="brand-sub">Split receipts calmly</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <button type="button" id="btnOpenPasteAi" class="btn btn-secondary btn-sm" title="Paste receipt JSON from Gemini / ChatGPT / Claude">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/></svg>
+        <span>Paste AI</span>
+      </button>
+
+      <label class="btn btn-primary btn-sm upload-trigger" for="receiptFileInput">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <span>Scan Receipt</span>
+      </label>
+      <input type="file" id="receiptFileInput" accept="image/*" hidden>
+
+      <button type="button" id="btnPreviewReceipt" class="btn btn-ghost btn-sm" hidden title="View uploaded receipt image">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+        <span>Receipt</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Workspace: 75% Left (Items) / 25% Right (Baskets, no scroll) -->
+  <main class="workspace">
+    <!-- LEFT PANE (75%) -->
+    <section class="pane-left" aria-label="Receipt items and charges">
+      <!-- Upload / OCR Dropzone -->
+      <div id="uploadDropzone" class="upload-dropzone" role="region" aria-label="Upload receipt image">
+        <div class="upload-dropzone-inner">
+          <div class="upload-icon" aria-hidden="true">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <path d="M12 18v-6"/>
+              <path d="m9 15 3-3 3 3"/>
+            </svg>
+          </div>
+          <div class="upload-copy">
+            <h2>Drop a receipt photo here or upload to scan</h2>
+            <p>Supports Thai &amp; English receipts. Auto-detects items, quantities, Service Charge &amp; VAT, and verifies totals.</p>
+          </div>
+          <div class="upload-cta-row">
+            <label class="btn btn-primary" for="receiptFileInput">Choose Receipt Image</label>
+            <button type="button" id="btnHeroPasteAi" class="btn btn-secondary">Paste from AI Chat (Free &amp; 100%)</button>
+          </div>
+          <div class="upload-engine-row">
+            <span class="engine-pill">100% browser-based — Offline OCR or paste JSON from Gemini web</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- OCR Progress Banner -->
+      <div id="ocrProgress" class="ocr-progress" hidden role="status" aria-live="polite">
+        <div class="spinner" aria-hidden="true"></div>
+        <div class="ocr-progress-text">
+          <strong id="ocrProgressTitle">Scanning receipt…</strong>
+          <span id="ocrProgressDetail">Preparing image</span>
+        </div>
+        <div class="ocr-progress-bar-wrap">
+          <div id="ocrProgressBar" class="ocr-progress-bar" style="width: 15%"></div>
+        </div>
+      </div>
+
+      <!-- Streamlined Summary & Tax Controls -->
+      <div class="summary-panel">
+        <!-- Tax & Charge Controls Bar -->
+        <div class="charges-bar" id="chargesBar">
+          <div class="receipt-meta" id="receiptMeta">
+            <span class="meta-badge" id="metaSourceBadge">No receipt loaded</span>
+            <button type="button" id="verifyStatusBadge" class="verify-badge" hidden title="Click to view total verification details"></button>
+            <span class="meta-details" id="metaDetailsText">Upload a slip to begin</span>
+          </div>
+
+          <div class="tax-controls">
+            <div class="tax-control-group">
+              <label class="switch-label" for="toggleServiceCharge">
+                <input type="checkbox" id="toggleServiceCharge" switch>
+                <span>SC</span>
+              </label>
+              <div class="rate-input-wrap">
+                <input type="number" id="inputServiceChargeRate" min="0" max="50" step="0.5" value="10" aria-label="Service charge percentage">
+                <span class="rate-unit">%</span>
+              </div>
+              <span class="auto-badge" id="badgeScAuto" hidden>Auto</span>
+            </div>
+
+            <div class="tax-control-group">
+              <label class="switch-label" for="toggleVat">
+                <input type="checkbox" id="toggleVat" switch>
+                <span>VAT</span>
+              </label>
+              <div class="rate-input-wrap">
+                <input type="number" id="inputVatRate" min="0" max="50" step="0.5" value="7" aria-label="VAT percentage">
+                <span class="rate-unit">%</span>
+              </div>
+              <span class="auto-badge" id="badgeVatAuto" hidden>Auto</span>
+            </div>
+
+            <label class="vat-compound-label" title="Calculate VAT on (Subtotal + Service Charge), standard for Thai restaurant receipts">
+              <input type="checkbox" id="toggleVatOnSc" checked>
+              <span>VAT on SC</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Receipt Totals & Progress Strip -->
+        <div class="totals-strip" id="totalsStrip">
+          <div class="total-stat">
+            <span class="stat-label">Subtotal</span>
+            <strong class="stat-value" id="statSubtotal">฿0.00</strong>
+          </div>
+          <div class="total-stat" id="statScWrap">
+            <span class="stat-label">Service (<span id="statScPct">10</span>%)</span>
+            <strong class="stat-value" id="statSc">฿0.00</strong>
+          </div>
+          <div class="total-stat" id="statVatWrap">
+            <span class="stat-label">VAT (<span id="statVatPct">7</span>%)</span>
+            <strong class="stat-value" id="statVat">฿0.00</strong>
+          </div>
+          <div class="total-stat total-stat-grand">
+            <span class="stat-label">Grand Total</span>
+            <strong class="stat-value" id="statGrandTotal">฿0.00</strong>
+          </div>
+          <div class="assignment-progress">
+            <div class="assignment-progress-header">
+              <span id="progressLabel">0 / 0 items assigned</span>
+              <span id="progressPercent">0%</span>
+            </div>
+            <div class="progress-track">
+              <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Items Toolbar -->
+      <div class="items-toolbar">
+        <div class="filter-tabs" role="tablist" aria-label="Filter items">
+          <button type="button" class="filter-tab active" data-filter="all" role="tab" aria-selected="true">
+            All <span class="tab-count" id="countAll">0</span>
+          </button>
+          <button type="button" class="filter-tab" data-filter="unassigned" role="tab" aria-selected="false">
+            Unassigned <span class="tab-count" id="countUnassigned">0</span>
+          </button>
+          <button type="button" class="filter-tab" data-filter="assigned" role="tab" aria-selected="false">
+            Assigned <span class="tab-count" id="countAssigned">0</span>
+          </button>
+        </div>
+
+        <div class="toolbar-right">
+          <div class="search-box">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+            <input type="search" id="searchItems" placeholder="Filter items…" aria-label="Filter items">
+          </div>
+          <button type="button" id="btnAddItem" class="btn btn-secondary btn-sm">+ Add Item</button>
+          <button type="button" id="btnResetAssignments" class="btn btn-ghost btn-sm" title="Move all items back to unassigned">Reset</button>
+        </div>
+      </div>
+
+      <!-- Draggable Items Grid (also a dropzone to unassign items dragged back from baskets) -->
+      <div id="itemsDropArea" class="items-drop-area" aria-label="Receipt items list">
+        <div id="itemsGrid" class="items-grid"></div>
+        <div id="emptyItemsHint" class="empty-items-hint" hidden>
+          <p>No items match this filter.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT PANE (25%) — NO-SCROLL BASKETS -->
+    <aside class="pane-right" aria-label="Share and individual baskets">
+      <div class="baskets-board">
+        <!-- SHARE (Prominent, unmistakably droppable at top) -->
+        <section class="basket-card share-basket" id="shareBasket" data-basket-id="shared" aria-label="Share">
+          <div class="basket-header">
+            <div class="basket-title-row">
+              <span class="share-icon" aria-hidden="true">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              </span>
+              <h2>Share</h2>
+              <button type="button" class="basket-count-pill clickable-pill" id="shareItemCountBtn" data-inspect-basket="shared" title="View shared items">
+                <span id="shareItemCount">0</span> items
+              </button>
+            </div>
+            <strong class="basket-total" id="shareTotalAmount">฿0.00</strong>
+          </div>
+
+          <div class="share-dropzone" id="shareDropzone">
+            <div class="share-dropzone-cue" id="shareDropCue">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+              </svg>
+              <span>Drop shared items here</span>
+            </div>
+            <div class="share-drop-preview" id="shareDropPreview" hidden></div>
+            <div class="basket-footer-note" id="sharePerPersonNote">
+              ฿0.00 / person
+            </div>
+          </div>
+
+          <div class="share-participants-bar" id="shareParticipantsBar" title="Click to toggle who splits Share">
+            <!-- Rendered dynamically -->
+          </div>
+        </section>
+
+        <!-- INDIVIDUAL HEADER -->
+        <div class="people-header">
+          <div class="people-header-left">
+            <h2>Individual</h2>
+          </div>
+          <div class="people-stepper" role="group" aria-label="Number of people">
+            <button type="button" id="btnRemovePerson" class="stepper-btn" aria-label="Remove person">−</button>
+            <span id="peopleCountDisplay" class="stepper-count">4</span>
+            <button type="button" id="btnAddPerson" class="stepper-btn" aria-label="Add person">+</button>
+          </div>
+        </div>
+
+        <!-- INDIVIDUAL BASKETS COMPACT GRID (fits viewport without scrolling) -->
+        <div id="individualBasketsList" class="individual-baskets-grid">
+          <!-- Rendered dynamically -->
+        </div>
+      </div>
+
+      <!-- Sticky Right Footer -->
+      <div class="pane-right-footer">
+        <div class="footer-check-row">
+          <span class="footer-check-label">Allocated</span>
+          <strong id="footerAllocatedTotal" class="footer-check-value">฿0.00 / ฿0.00</strong>
+        </div>
+        <button type="button" id="btnFooterSummary" class="btn btn-accent btn-full">
+          Copy Split Summary
+        </button>
+      </div>
+    </aside>
+  </main>
+
+  <!-- DIALOG: Total Price Verification Warning -->
+  <dialog id="verifyDialog" closedby="any" aria-labelledby="verifyDialogTitle" class="dialog-verify">
+    <div class="dialog-header">
+      <div class="verify-title-wrap">
+        <span class="verify-warn-icon" aria-hidden="true">⚠</span>
+        <h1 id="verifyDialogTitle">Total Price Mismatch Detected</h1>
+      </div>
+      <form method="dialog">
+        <button type="submit" class="icon-close-btn" aria-label="Close warning">&times;</button>
+      </form>
+    </div>
+    <div class="dialog-body">
+      <p id="verifyMessage" class="verify-message"></p>
+      <div class="verify-table" id="verifyTable"></div>
+      <p class="verify-tip">Tip: Check the receipt image for missed items, merged modifiers, or misread prices, then edit or add items on the left.</p>
+    </div>
+    <div class="dialog-footer">
+      <button type="button" id="btnVerifyViewReceipt" class="btn btn-secondary">View Receipt</button>
+      <div class="dialog-footer-right">
+        <button type="button" id="btnVerifyAddItem" class="btn btn-secondary">+ Add Item</button>
+        <form method="dialog">
+          <button type="submit" class="btn btn-primary" autofocus>Review Items</button>
+        </form>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- DIALOG: Items Inspector -->
+  <dialog id="basketDetailDialog" closedby="any" aria-labelledby="basketDetailTitle" class="dialog-assign">
+    <div class="dialog-header">
+      <h1 id="basketDetailTitle">Assigned Items</h1>
+      <form method="dialog">
+        <button type="submit" class="icon-close-btn" aria-label="Close items">&times;</button>
+      </form>
+    </div>
+    <div class="dialog-body">
+      <div id="basketDetailSummary" class="assign-item-preview"></div>
+      <div id="basketDetailList" class="basket-detail-list"></div>
+    </div>
+    <div class="dialog-footer">
+      <div class="dialog-footer-right">
+        <form method="dialog">
+          <button type="submit" class="btn btn-primary" autofocus>Done</button>
+        </form>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- DIALOG: Paste from AI Chat (Free & 100% accurate) -->
+  <dialog id="pasteAiDialog" closedby="any" aria-labelledby="pasteAiTitle" class="dialog-summary">
+    <div class="dialog-header">
+      <h1 id="pasteAiTitle">Import from AI Chat (Gemini / ChatGPT / Claude)</h1>
+      <form method="dialog">
+        <button type="submit" class="icon-close-btn" aria-label="Close AI import">&times;</button>
+      </form>
+    </div>
+    <div class="dialog-body">
+      <div id="pasteAiNotice" hidden style="padding: 10px 12px; border-radius: var(--radius-sm); background: var(--warning-soft); border: 1px solid #fde68a; color: #92400e; font-size: 13px; font-weight: 500;"></div>
+      <div class="form-field">
+        <label>Step 1: Copy prompt &amp; upload your receipt photo to Gemini / ChatGPT / Claude</label>
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <button type="button" id="btnCopyAiPrompt" class="btn btn-secondary btn-sm">Copy Receipt Prompt</button>
+          <span id="copyPromptStatus" class="copy-confirm" aria-live="polite"></span>
+        </div>
+      </div>
+      <div class="form-field">
+        <label for="pasteAiTextarea">Step 2: Paste the JSON reply here</label>
+        <textarea id="pasteAiTextarea" class="summary-textarea" rows="11" placeholder='{ "meta": { ... }, "serviceCharge": { ... }, "vat": { ... }, "items": [ ... ] }'></textarea>
+        <small id="pasteAiError" style="color: var(--danger); font-weight: 500;" aria-live="polite"></small>
+      </div>
+    </div>
+    <div class="dialog-footer">
+      <div class="dialog-footer-right">
+        <form method="dialog">
+          <button type="submit" class="btn btn-secondary">Cancel</button>
+        </form>
+        <button type="button" id="btnImportAiJson" class="btn btn-primary" autofocus>Import Receipt</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- DIALOG: Receipt Preview -->
+  <dialog id="previewDialog" closedby="any" aria-labelledby="previewTitle" class="dialog-preview">
+    <div class="dialog-header">
+      <h1 id="previewTitle">Receipt Image</h1>
+      <div class="dialog-header-actions">
+        <button type="button" id="btnRescanReceipt" class="btn btn-secondary btn-sm">Re-scan with OCR</button>
+        <form method="dialog">
+          <button type="submit" class="icon-close-btn" aria-label="Close receipt preview">&times;</button>
+        </form>
+      </div>
+    </div>
+    <div class="dialog-body preview-body">
+      <img id="receiptPreviewImg" alt="Uploaded receipt preview">
+    </div>
+  </dialog>
+
+  <!-- DIALOG: Bill Summary -->
+  <dialog id="summaryDialog" closedby="any" aria-labelledby="summaryTitle" class="dialog-summary">
+    <div class="dialog-header">
+      <h1 id="summaryTitle">Split Summary</h1>
+      <form method="dialog">
+        <button type="submit" class="icon-close-btn" aria-label="Close summary">&times;</button>
+      </form>
+    </div>
+    <div class="dialog-body">
+      <div class="summary-options">
+        <label class="checkbox-inline">
+          <input type="checkbox" id="chkSummaryDetails" checked>
+          <span>Include itemized breakdown per person</span>
+        </label>
+      </div>
+      <textarea id="summaryTextarea" class="summary-textarea" rows="16" readonly aria-label="Formatted bill split summary"></textarea>
+    </div>
+    <div class="dialog-footer">
+      <span id="copyConfirmMsg" class="copy-confirm" aria-live="polite"></span>
+      <div class="dialog-footer-right">
+        <form method="dialog">
+          <button type="submit" class="btn btn-secondary">Close</button>
+        </form>
+        <button type="button" id="btnCopySummary" class="btn btn-primary" autofocus>Copy to Clipboard</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- DIALOG: Add / Edit Item -->
+  <dialog id="itemDialog" closedby="any" aria-labelledby="itemDialogTitle">
+    <div class="dialog-header">
+      <h1 id="itemDialogTitle">Add Item</h1>
+      <form method="dialog">
+        <button type="submit" class="icon-close-btn" aria-label="Close item editor">&times;</button>
+      </form>
+    </div>
+    <form id="itemForm" class="dialog-body">
+      <input type="hidden" id="editItemId">
+      <div class="form-field">
+        <label for="editItemName">Item Name</label>
+        <input type="text" id="editItemName" required placeholder="e.g. ข้าวผัดอเมริกัน">
+      </div>
+      <div class="form-row-2">
+        <div class="form-field">
+          <label for="editItemPrice">Unit Price</label>
+          <input type="number" id="editItemPrice" required min="0" step="0.01" placeholder="0.00">
+        </div>
+        <div class="form-field" id="editItemQtyWrap">
+          <label for="editItemQty">Quantity (auto-expands)</label>
+          <input type="number" id="editItemQty" min="1" max="50" step="1" value="1">
+        </div>
+      </div>
+      <div class="dialog-footer dialog-footer-inline">
+        <button type="button" id="btnDeleteItem" class="btn btn-danger-ghost" hidden>Delete</button>
+        <div class="dialog-footer-right">
+          <button type="button" id="btnCancelItem" class="btn btn-secondary">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- DIALOG: Quick Assign -->
+  <dialog id="assignDialog" closedby="any" aria-labelledby="assignDialogTitle" class="dialog-assign">
+    <div class="dialog-header">
+      <h1 id="assignDialogTitle">Assign Item</h1>
+      <form method="dialog">
+        <button type="submit" class="icon-close-btn" aria-label="Close assign menu">&times;</button>
+      </form>
+    </div>
+    <div class="dialog-body">
+      <p id="assignItemPreview" class="assign-item-preview"></p>
+      <div id="assignTargetsList" class="assign-targets-list"></div>
+    </div>
+  </dialog>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
