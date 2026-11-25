@@ -2002,20 +2002,39 @@ dialog::backdrop {
     gap: 7px;
   }
 
+  .item-card {
+    padding: 10px 52px 10px 12px;
+    cursor: pointer;
+    overflow: hidden;
+  }
+
   .item-grip {
-    display: inline-flex;
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 42px;
+    margin: 0;
+    padding: 0;
+    display: flex;
     align-items: center;
     justify-content: center;
-    padding: 6px 5px;
-    margin: -4px 2px -4px -4px;
-    opacity: 0.72;
+    background: var(--surface-subtle);
+    border-left: 1px solid var(--border);
+    color: var(--text-muted);
+    opacity: 1;
     touch-action: none;
     cursor: grab;
   }
 
-  .item-card {
-    padding: 10px 12px;
-    cursor: grab;
+  .item-grip svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .item-card.dragging .item-grip {
+    background: var(--ink);
+    color: #ffffff;
   }
 
   .item-icon-btn {
