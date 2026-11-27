@@ -240,34 +240,71 @@ export default {
     }
 
     const primaryModel = env.PRIMARY_MODEL || 'gemini-2.5-flash-lite';
-    const fallbackModel = env.FALLBACK_MODEL || 'gemini-2.5-flash';
+    const fallbackModels = [
+      env.FALLBACK_MODEL || 'gemini-2.5-flash',
+      'gemini-2.0-flash',
+      'gemini-flash-latest'
+    ].filter((m, idx, arr) => m && m !== primaryModel && arr.indexOf(m) === idx);
 
     try {
       let usedModel = primaryModel;
-      let parsed = await callGemini(env.GEMINI_API_KEY, primaryModel, imageBase64, mimeType.toLowerCase());
+      let parsed = null;
+      let lastErr = null;
 
+      try {
+        parsed = await callGemini(env.GEMINI_API_KEY, primaryModel, imageBase64, mimeType.toLowerCase());
+      } catch (err) {
+        lastErr = err;
+        const code = String(err?.message || '');
+        // If primary model is 404/429/503, automatically try fallback models
+        if (code === 'UPSTREAM_404' || code === 'UPSTREAM_429' || code === 'UPSTREAM_503') {
+          for (const candidate of fallbackModels) {
+            try {
+              parsed = await callGemini(env.GEMINI_API_KEY, candidate, imageBase64, mimeType.toLowerCase());
+              usedModel = candidate;
+              lastErr = null;
+              break;
+            } catch (e2) {
+              lastErr = e2;
+            }
+          }
+        }
+      }
+
+      if (!parsed) throw lastErr || new Error('OCR_FAILED');
+
+      // Smart escalation: if primary model succeeded but missed an item, retry once with first fallback model
+      const escalateModel = fallbackModels[0];
       if (
+        usedModel === primaryModel &&
         (!parsed.imageStatus || parsed.imageStatus === 'ok') &&
         !totalsMatch(parsed) &&
-        fallbackModel &&
-        fallbackModel !== primaryModel
+        escalateModel
       ) {
         try {
-          const retryParsed = await callGemini(env.GEMINI_API_KEY, fallbackModel, imageBase64, mimeType.toLowerCase());
+          const retryParsed = await callGemini(env.GEMINI_API_KEY, escalateModel, imageBase64, mimeType.toLowerCase());
           parsed = retryParsed;
-          usedModel = fallbackModel;
+          usedModel = escalateModel;
         } catch (err) {
-          console.error('Fallback model failed:', err?.message);
+          console.error('Escalation model failed:', err?.message);
         }
       }
 
       return jsonResponse({ ...parsed, usedModel }, 200, headers);
     } catch (err) {
       const code = String(err?.message || '');
-      const status = code === 'UPSTREAM_429' ? 429 : 502;
-      const clientMsg = status === 429
-        ? 'AI scanner is busy right now. Please retry in a moment.'
-        : 'OCR service temporarily unavailable. Please try again.';
+      let status = 502;
+      let clientMsg = `OCR service error (${code || 'UNKNOWN'}). Please try again.`;
+      if (code === 'UPSTREAM_429') {
+        status = 429;
+        clientMsg = 'Gemini API quota or rate limit reached (429). Please retry in a moment or check Google AI Studio billing.';
+      } else if (code === 'UPSTREAM_403' || code === 'UPSTREAM_401' || code === 'UPSTREAM_400') {
+        status = 502;
+        clientMsg = `Gemini API key or request rejected (${code}). Check GEMINI_API_KEY in Cloudflare Secrets.`;
+      } else if (code === 'UPSTREAM_404') {
+        status = 502;
+        clientMsg = 'Gemini model not available (404).';
+      }
       return jsonResponse({ error: clientMsg }, status, headers);
     }
   }
