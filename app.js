@@ -671,23 +671,49 @@ function renderItemsGrid() {
   }).join('');
 }
 
+function renderPreviewChips(items, maxChips, inspectTarget, chipClass = 'share-preview-chip') {
+  if (!items || items.length === 0) return '';
+  // Group identical item names so repeated items show as "2× Item"
+  const grouped = [];
+  const byName = new Map();
+  for (const item of items) {
+    const key = item.name;
+    if (byName.has(key)) {
+      byName.get(key).count += 1;
+    } else {
+      const entry = { name: item.name, count: 1 };
+      byName.set(key, entry);
+      grouped.push(entry);
+    }
+  }
+
+  const shown = grouped.slice(0, maxChips);
+  const extraCount = grouped.slice(maxChips).reduce((sum, g) => sum + g.count, 0);
+
+  const chipsHtml = shown
+    .map((g) => {
+      const label = g.count > 1 ? `${g.count}× ${g.name}` : g.name;
+      return `<span class="${chipClass}" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`;
+    })
+    .join('');
+
+  const moreHtml = extraCount > 0
+    ? `<button type="button" class="share-preview-more" data-inspect-basket="${escapeHtml(inspectTarget)}">+${extraCount} more</button>`
+    : '';
+
+  return chipsHtml + moreHtml;
+}
+
 function renderShareBasket(totals) {
   const sharedCount = totals.sharedItems.length;
+  const isCompact = state.people.length >= 7;
   els.shareItemCount.textContent = sharedCount;
   els.shareTotalAmount.textContent = fmt(totals.sharedTotals.total);
   els.shareBasket.classList.toggle('has-items', sharedCount > 0);
 
   if (els.shareDropPreview && els.shareDropCue) {
     if (sharedCount > 0) {
-      const previewItems = totals.sharedItems.slice(0, 2);
-      const extra = sharedCount - previewItems.length;
-      const chipsHtml = previewItems
-        .map((item) => `<span class="share-preview-chip">${escapeHtml(item.name)}</span>`)
-        .join('');
-      const moreHtml = extra > 0
-        ? `<button type="button" class="share-preview-more" data-inspect-basket="shared">+${extra} more</button>`
-        : '';
-      els.shareDropPreview.innerHTML = chipsHtml + moreHtml;
+      els.shareDropPreview.innerHTML = renderPreviewChips(totals.sharedItems, isCompact ? 3 : 6, 'shared', 'share-preview-chip');
       els.shareDropPreview.hidden = false;
       els.shareDropCue.hidden = true;
     } else {
@@ -729,6 +755,10 @@ function renderIndividualBaskets(totals) {
     if (data.ownSubtotal > 0) miniParts.push(`Own ${fmtHtml(data.ownSubtotal)}`);
     if (data.sharePart > 0) miniParts.push(`Share ${fmtHtml(data.sharePart)}`);
     const miniLine = miniParts.length > 0 ? miniParts.join(' · ') : 'Drop items';
+    const maxPersonChips = n >= 7 ? 3 : 6;
+    const personChipsHtml = data.ownItems.length > 0
+      ? renderPreviewChips(data.ownItems, maxPersonChips, person.id, 'person-preview-chip')
+      : '';
 
     return `
       <section class="basket-card person-basket" data-basket-id="${person.id}" style="--basket-color: ${safeColor}" aria-label="${escapeHtml(person.name)}">
@@ -739,6 +769,7 @@ function renderIndividualBaskets(totals) {
           <input type="text" class="person-name-input" value="${escapeHtml(person.name)}" data-person-name="${person.id}" aria-label="Person name">
           <button type="button" class="basket-count-pill clickable-pill" data-inspect-basket="${person.id}" title="View items for ${escapeHtml(person.name)}">${data.ownItems.length}</button>
         </div>
+        <div class="person-items-preview">${personChipsHtml}</div>
         <div class="person-bottom-row">
           <div class="person-total-line">
             <strong class="person-total-amount">${fmtHtml(data.total)}</strong>
