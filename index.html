@@ -28,18 +28,20 @@
     </div>
 
     <div class="header-actions">
-      <button type="button" id="btnOpenPasteAi" class="btn btn-secondary btn-sm" title="Paste receipt JSON from Gemini / ChatGPT / Claude">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/></svg>
-        <span>Paste AI</span>
+      <button type="button" class="btn btn-primary btn-sm upload-trigger mobile-only-btn" data-pick-input="camera">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+        <span>Camera</span>
       </button>
+      <input type="file" id="receiptCameraInput" accept="image/*" capture="environment" hidden>
 
-      <label class="btn btn-primary btn-sm upload-trigger" for="receiptFileInput">
+      <button type="button" class="btn btn-primary btn-sm upload-trigger desktop-scan-btn" data-pick-input="file">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        <span>Scan Receipt</span>
-      </label>
+        <span class="scan-btn-label-desktop">Scan Receipt</span>
+        <span class="scan-btn-label-mobile">Photos</span>
+      </button>
       <input type="file" id="receiptFileInput" accept="image/*" hidden>
 
-      <button type="button" id="btnPreviewReceipt" class="btn btn-ghost btn-sm" hidden title="View uploaded receipt image">
+      <button type="button" id="btnPreviewReceipt" class="btn btn-ghost btn-sm" hidden title="View uploaded receipt image" aria-label="View uploaded receipt image">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
         <span>Receipt</span>
       </button>
@@ -62,15 +64,19 @@
             </svg>
           </div>
           <div class="upload-copy">
-            <h2>Drop a receipt photo here or upload to scan</h2>
-            <p>Supports Thai &amp; English receipts. Auto-detects items, quantities, Service Charge &amp; VAT, and verifies totals.</p>
+            <h2>Scan a receipt to start splitting</h2>
+            <p>Reads Thai &amp; English receipts with AI—auto-detects items, quantities, Service Charge &amp; VAT, and verifies totals.</p>
           </div>
           <div class="upload-cta-row">
-            <label class="btn btn-primary" for="receiptFileInput">Choose Receipt Image</label>
-            <button type="button" id="btnHeroPasteAi" class="btn btn-secondary">Paste from AI Chat (Free &amp; 100%)</button>
+            <button type="button" class="btn btn-primary mobile-only-btn" data-pick-input="camera">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+              <span>Take Receipt Photo</span>
+            </button>
+            <button type="button" class="btn btn-primary desktop-only-btn" data-pick-input="file">Choose Receipt Image</button>
+            <button type="button" class="btn btn-secondary mobile-only-btn" data-pick-input="file">Choose from Photos</button>
           </div>
           <div class="upload-engine-row">
-            <span class="engine-pill">100% browser-based — Offline OCR or paste JSON from Gemini web</span>
+            <span class="engine-pill">Powered by Gemini Vision AI</span>
           </div>
         </div>
       </div>
@@ -259,6 +265,32 @@
     </aside>
   </main>
 
+  <!-- DIALOG: Scan Error (Blurry, Cut Off, Not a Receipt, Mismatch, etc.) -->
+  <dialog id="scanErrorDialog" closedby="any" aria-labelledby="scanErrorTitle" class="dialog-verify">
+    <div class="dialog-header">
+      <div class="verify-title-wrap">
+        <span class="verify-warn-icon" aria-hidden="true">!</span>
+        <h1 id="scanErrorTitle">Couldn't Read Receipt Clearly</h1>
+      </div>
+      <form method="dialog">
+        <button type="submit" class="icon-close-btn" aria-label="Close error dialog">&times;</button>
+      </form>
+    </div>
+    <div class="dialog-body">
+      <p id="scanErrorMessage" class="verify-message"></p>
+      <p id="scanErrorTip" class="verify-tip"></p>
+    </div>
+    <div class="dialog-footer dialog-footer-stack">
+      <div class="dialog-footer-right">
+        <button type="button" class="btn btn-secondary btn-sm" data-pick-input="file" id="btnScanErrPhotos">Choose Photo</button>
+        <button type="button" class="btn btn-primary btn-sm mobile-only-btn" data-pick-input="camera" id="btnScanErrCamera">Retake Photo</button>
+        <form method="dialog" class="desktop-only-btn">
+          <button type="submit" class="btn btn-primary btn-sm" autofocus>Close</button>
+        </form>
+      </div>
+    </div>
+  </dialog>
+
   <!-- DIALOG: Total Price Verification Warning -->
   <dialog id="verifyDialog" closedby="any" aria-labelledby="verifyDialogTitle" class="dialog-verify">
     <div class="dialog-header">
@@ -275,12 +307,12 @@
       <div class="verify-table" id="verifyTable"></div>
       <p class="verify-tip">Tip: Check the receipt image for missed items, merged modifiers, or misread prices, then edit or add items on the left.</p>
     </div>
-    <div class="dialog-footer">
-      <button type="button" id="btnVerifyViewReceipt" class="btn btn-secondary">View Receipt</button>
+    <div class="dialog-footer dialog-footer-stack">
+      <button type="button" id="btnVerifyViewReceipt" class="btn btn-secondary btn-sm">View Receipt</button>
       <div class="dialog-footer-right">
-        <button type="button" id="btnVerifyAddItem" class="btn btn-secondary">+ Add Item</button>
+        <button type="button" id="btnVerifyAddItem" class="btn btn-secondary btn-sm">+ Add Item</button>
         <form method="dialog">
-          <button type="submit" class="btn btn-primary" autofocus>Review Items</button>
+          <button type="submit" class="btn btn-primary btn-sm" autofocus>Review Items</button>
         </form>
       </div>
     </div>
@@ -303,39 +335,6 @@
         <form method="dialog">
           <button type="submit" class="btn btn-primary" autofocus>Done</button>
         </form>
-      </div>
-    </div>
-  </dialog>
-
-  <!-- DIALOG: Paste from AI Chat (Free & 100% accurate) -->
-  <dialog id="pasteAiDialog" closedby="any" aria-labelledby="pasteAiTitle" class="dialog-summary">
-    <div class="dialog-header">
-      <h1 id="pasteAiTitle">Import from AI Chat (Gemini / ChatGPT / Claude)</h1>
-      <form method="dialog">
-        <button type="submit" class="icon-close-btn" aria-label="Close AI import">&times;</button>
-      </form>
-    </div>
-    <div class="dialog-body">
-      <div id="pasteAiNotice" hidden style="padding: 10px 12px; border-radius: var(--radius-sm); background: var(--warning-soft); border: 1px solid #fde68a; color: #92400e; font-size: 13px; font-weight: 500;"></div>
-      <div class="form-field">
-        <label>Step 1: Copy prompt &amp; upload your receipt photo to Gemini / ChatGPT / Claude</label>
-        <div style="display: flex; align-items: center; gap: 10px;">
-          <button type="button" id="btnCopyAiPrompt" class="btn btn-secondary btn-sm">Copy Receipt Prompt</button>
-          <span id="copyPromptStatus" class="copy-confirm" aria-live="polite"></span>
-        </div>
-      </div>
-      <div class="form-field">
-        <label for="pasteAiTextarea">Step 2: Paste the JSON reply here</label>
-        <textarea id="pasteAiTextarea" class="summary-textarea" rows="11" placeholder='{ "meta": { ... }, "serviceCharge": { ... }, "vat": { ... }, "items": [ ... ] }'></textarea>
-        <small id="pasteAiError" style="color: var(--danger); font-weight: 500;" aria-live="polite"></small>
-      </div>
-    </div>
-    <div class="dialog-footer">
-      <div class="dialog-footer-right">
-        <form method="dialog">
-          <button type="submit" class="btn btn-secondary">Cancel</button>
-        </form>
-        <button type="button" id="btnImportAiJson" class="btn btn-primary" autofocus>Import Receipt</button>
       </div>
     </div>
   </dialog>

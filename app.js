@@ -1,10 +1,10 @@
 import {
+  compressReceiptImage,
   expandReceiptItems,
-  fileToBase64,
-  normalizeParsedReceiptJson,
   normalizeThaiText,
-  parseReceiptWithTesseract,
-  RECEIPT_OCR_PROMPT
+  OCR_WORKER_URL,
+  parseReceiptWithWorker,
+  sanitizeCurrency
 } from './ocr.js';
 
 // Feature-detected polyfill for <input type="checkbox" switch> (modern-web-guidance: switch)
@@ -83,16 +83,16 @@ const state = {
   draggedItemId: null,
   inspectingBasketId: null,
   settings: {
-    currency: localStorage.getItem(STORAGE_KEYS.currency) || '฿'
+    currency: sanitizeCurrency(localStorage.getItem(STORAGE_KEYS.currency), '฿')
   }
 };
 
 // DOM References
 const els = {
+  paneRight: document.querySelector('.pane-right'),
   uploadDropzone: document.getElementById('uploadDropzone'),
+  receiptCameraInput: document.getElementById('receiptCameraInput'),
   receiptFileInput: document.getElementById('receiptFileInput'),
-  btnOpenPasteAi: document.getElementById('btnOpenPasteAi'),
-  btnHeroPasteAi: document.getElementById('btnHeroPasteAi'),
   btnPreviewReceipt: document.getElementById('btnPreviewReceipt'),
   btnFooterSummary: document.getElementById('btnFooterSummary'),
 
@@ -149,6 +149,11 @@ const els = {
   footerAllocatedTotal: document.getElementById('footerAllocatedTotal'),
 
   // Dialogs
+  scanErrorDialog: document.getElementById('scanErrorDialog'),
+  scanErrorTitle: document.getElementById('scanErrorTitle'),
+  scanErrorMessage: document.getElementById('scanErrorMessage'),
+  scanErrorTip: document.getElementById('scanErrorTip'),
+
   verifyDialog: document.getElementById('verifyDialog'),
   verifyMessage: document.getElementById('verifyMessage'),
   verifyTable: document.getElementById('verifyTable'),
@@ -159,14 +164,6 @@ const els = {
   basketDetailTitle: document.getElementById('basketDetailTitle'),
   basketDetailSummary: document.getElementById('basketDetailSummary'),
   basketDetailList: document.getElementById('basketDetailList'),
-
-  pasteAiDialog: document.getElementById('pasteAiDialog'),
-  pasteAiNotice: document.getElementById('pasteAiNotice'),
-  btnCopyAiPrompt: document.getElementById('btnCopyAiPrompt'),
-  copyPromptStatus: document.getElementById('copyPromptStatus'),
-  pasteAiTextarea: document.getElementById('pasteAiTextarea'),
-  pasteAiError: document.getElementById('pasteAiError'),
-  btnImportAiJson: document.getElementById('btnImportAiJson'),
 
   previewDialog: document.getElementById('previewDialog'),
   receiptPreviewImg: document.getElementById('receiptPreviewImg'),
@@ -205,6 +202,10 @@ function fmt(amount) {
   })}`;
 }
 
+function fmtHtml(amount) {
+  return escapeHtml(fmt(amount));
+}
+
 function fmtSignedDiff(diff) {
   const sign = diff > 0 ? '+' : diff < 0 ? '−' : '';
   return `${sign}${fmt(Math.abs(diff))}`;
@@ -215,7 +216,33 @@ function escapeHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function sanitizeHexColor(color, fallback = '#2563eb') {
+  return typeof color === 'string' && /^#[0-9a-fA-F]{6}$/.test(color) ? color : fallback;
+}
+
+function safeShowModal(dialog) {
+  if (dialog && !dialog.open) {
+    dialog.showModal();
+  }
+}
+
+function setReceiptPreview(previewUrl, file = null) {
+  if (state.receiptImageUrl && state.receiptImageUrl.startsWith('blob:')) {
+    URL.revokeObjectURL(state.receiptImageUrl);
+  }
+  state.receiptImageUrl = previewUrl || null;
+  state.receiptImageFile = file || null;
+  if (previewUrl) {
+    els.receiptPreviewImg.src = previewUrl;
+    els.btnPreviewReceipt.hidden = false;
+  } else {
+    els.receiptPreviewImg.removeAttribute('src');
+    els.btnPreviewReceipt.hidden = true;
+  }
 }
 
 let toastTimer = null;
@@ -255,7 +282,7 @@ function initPeople(count = 4) {
   }
 }
 
-// Tax & Total Calculations
+// Tax & Total Calculations (largest-remainder cent distribution to prevent ฿0.01 drift)
 function computeTotals() {
   const subtotal = state.items.reduce((sum, item) => sum + item.price, 0);
   const scRate = state.charges.scEnabled ? state.charges.scRate : 0;
@@ -281,29 +308,48 @@ function computeTotals() {
   const sharePerPersonBase = activeShareIds.length > 0 ? sharedSubtotal / shareDivisor : 0;
   const sharedTotals = calcCharges(sharedSubtotal);
 
-  // Individual baskets
-  const perPerson = new Map();
-  let allocatedTotal = 0;
-
-  for (const person of state.people) {
+  // Individual baskets (compute exact floats first, then distribute cents cleanly)
+  const rawEntries = state.people.map((person) => {
     const ownItems = state.items.filter((i) => i.assignedTo === person.id);
     const ownSubtotal = ownItems.reduce((sum, i) => sum + i.price, 0);
     const sharePart = state.shareParticipants.has(person.id) ? sharePerPersonBase : 0;
     const combinedBase = ownSubtotal + sharePart;
     const breakdown = calcCharges(combinedBase);
-    allocatedTotal += breakdown.total;
+    return { person, ownItems, ownSubtotal, sharePart, ...breakdown };
+  });
 
-    perPerson.set(person.id, {
-      ownItems,
-      ownSubtotal,
-      sharePart,
-      ...breakdown
+  // Largest-remainder cent distribution across active participants so displayed totals sum cleanly
+  const exactTotalCents = Math.round(rawEntries.reduce((s, e) => s + e.total, 0) * 100);
+  const floorEntries = rawEntries.map((e, idx) => {
+    const exact = e.total * 100;
+    const floored = Math.floor(exact);
+    return { idx, floored, frac: exact - floored };
+  });
+  let diffCents = exactTotalCents - floorEntries.reduce((s, e) => s + e.floored, 0);
+  const byFrac = [...floorEntries].sort((a, b) => b.frac - a.frac);
+  for (let i = 0; i < byFrac.length && diffCents > 0; i++) {
+    byFrac[i].floored += 1;
+    diffCents -= 1;
+  }
+
+  const perPerson = new Map();
+  let allocatedCents = 0;
+  for (const item of floorEntries) {
+    const entry = rawEntries[item.idx];
+    const roundedTotal = item.floored / 100;
+    allocatedCents += item.floored;
+    perPerson.set(entry.person.id, {
+      ownItems: entry.ownItems,
+      ownSubtotal: entry.ownSubtotal,
+      sharePart: entry.sharePart,
+      base: entry.base,
+      sc: entry.sc,
+      vat: entry.vat,
+      total: roundedTotal
     });
   }
 
-  if (sharedItems.length > 0 && activeShareIds.length === 0) {
-    allocatedTotal += sharedTotals.total;
-  }
+  const hasUnsplitShare = sharedItems.length > 0 && activeShareIds.length === 0;
 
   return {
     receipt,
@@ -313,7 +359,8 @@ function computeTotals() {
     activeShareIds,
     sharePerPersonBase,
     perPerson,
-    allocatedTotal
+    allocatedTotal: allocatedCents / 100,
+    hasUnsplitShare
   };
 }
 
@@ -360,10 +407,10 @@ function openVerifyDialog() {
         <span>Field</span><span>Receipt</span><span>Extracted</span><span>Diff</span>
       </div>
       <div class="verify-row">
-        <span>Subtotal</span><span>Not detected</span><span>${fmt(totals.receipt.base)}</span><span>—</span>
+        <span>Subtotal</span><span>Not detected</span><span>${fmtHtml(totals.receipt.base)}</span><span>—</span>
       </div>
       <div class="verify-row">
-        <span>Grand Total</span><span>Not detected</span><span>${fmt(totals.receipt.total)}</span><span>—</span>
+        <span>Grand Total</span><span>Not detected</span><span>${fmtHtml(totals.receipt.total)}</span><span>—</span>
       </div>
     `;
   } else {
@@ -380,10 +427,10 @@ function openVerifyDialog() {
     const subRow = v.repSub != null ? `
       <div class="verify-row">
         <span>Subtotal</span>
-        <span>${fmt(v.repSub)}</span>
-        <span>${fmt(totals.receipt.base)}</span>
+        <span>${fmtHtml(v.repSub)}</span>
+        <span>${fmtHtml(totals.receipt.base)}</span>
         <span class="${Math.abs(v.subtotalDiff) > 0.05 ? 'verify-diff-bad' : 'verify-diff-ok'}">
-          ${Math.abs(v.subtotalDiff) <= 0.05 ? '✓ Match' : fmtSignedDiff(v.subtotalDiff)}
+          ${Math.abs(v.subtotalDiff) <= 0.05 ? '✓ Match' : escapeHtml(fmtSignedDiff(v.subtotalDiff))}
         </span>
       </div>
     ` : '';
@@ -391,10 +438,10 @@ function openVerifyDialog() {
     const totRow = v.repTot != null ? `
       <div class="verify-row">
         <span><strong>Grand Total</strong></span>
-        <span><strong>${fmt(v.repTot)}</strong></span>
-        <span><strong>${fmt(totals.receipt.total)}</strong></span>
+        <span><strong>${fmtHtml(v.repTot)}</strong></span>
+        <span><strong>${fmtHtml(totals.receipt.total)}</strong></span>
         <span class="${Math.abs(v.totalDiff) > 0.05 ? 'verify-diff-bad' : 'verify-diff-ok'}">
-          ${Math.abs(v.totalDiff) <= 0.05 ? '✓ Match' : fmtSignedDiff(v.totalDiff)}
+          ${Math.abs(v.totalDiff) <= 0.05 ? '✓ Match' : escapeHtml(fmtSignedDiff(v.totalDiff))}
         </span>
       </div>
     ` : '';
@@ -409,42 +456,34 @@ function openVerifyDialog() {
   }
 
   els.btnVerifyViewReceipt.hidden = !state.receiptImageUrl;
-  els.verifyDialog.showModal();
+  safeShowModal(els.verifyDialog);
 }
 
 // Apply Parsed Receipt Data to State
-function applyReceiptData(data, imageUrl = null, imageFile = null) {
+function applyReceiptData(data, previewUrl = null, imageFile = null) {
   state.items = expandReceiptItems(data.items || []);
   state.meta = data.meta || {};
-  state.sourceLabel = data.source || 'OCR';
+  state.sourceLabel = data.source || 'AI Vision';
   state.reportedTotals = {
     subtotal: data.reportedTotals?.subtotal ?? null,
     total: data.reportedTotals?.total ?? null
   };
 
-  if (imageUrl) {
-    state.receiptImageUrl = imageUrl;
-    state.receiptImageFile = imageFile;
-    els.receiptPreviewImg.src = imageUrl;
-    els.btnPreviewReceipt.hidden = false;
-  } else {
-    state.receiptImageUrl = null;
-    state.receiptImageFile = null;
-    els.receiptPreviewImg.removeAttribute('src');
-    els.btnPreviewReceipt.hidden = true;
-  }
+  setReceiptPreview(previewUrl, imageFile);
 
   if (data.meta?.currency) {
-    state.settings.currency = data.meta.currency;
+    state.settings.currency = sanitizeCurrency(data.meta.currency, '฿');
   }
 
   // Automatically set VAT / Service Charge ON or OFF based on receipt data
+  const scRateVal = Number(data.serviceCharge?.rate);
   state.charges.scEnabled = Boolean(data.serviceCharge?.enabled);
-  state.charges.scRate = Number(data.serviceCharge?.rate) || 10;
+  state.charges.scRate = Number.isFinite(scRateVal) ? Math.min(100, Math.max(0, scRateVal)) : 10;
   state.charges.scAuto = true;
 
+  const vatRateVal = Number(data.vat?.rate);
   state.charges.vatEnabled = Boolean(data.vat?.enabled);
-  state.charges.vatRate = Number(data.vat?.rate) || 7;
+  state.charges.vatRate = Number.isFinite(vatRateVal) ? Math.min(100, Math.max(0, vatRateVal)) : 7;
   state.charges.vatAuto = true;
   state.charges.vatOnSc = data.vat?.appliesToServiceCharge !== false;
 
@@ -560,10 +599,10 @@ function renderHeaderAndMeta(totals) {
 function getOwnerInfo(assignedTo) {
   if (!assignedTo) return null;
   if (assignedTo === 'shared') {
-    return { name: 'Share', color: '#6366f1' };
+    return { name: 'Share', color: '#4f46e5' };
   }
   const person = state.people.find((p) => p.id === assignedTo);
-  return person ? { name: person.name, color: person.color } : null;
+  return person ? { name: person.name, color: sanitizeHexColor(person.color) } : null;
 }
 
 function renderItemsGrid() {
@@ -614,7 +653,7 @@ function renderItemsGrid() {
             <span class="item-name">${escapeHtml(item.name)}</span>
             ${unitBadge}
           </div>
-          <span class="item-price">${fmt(item.price)}</span>
+          <span class="item-price">${fmtHtml(item.price)}</span>
         </div>
         <div class="item-card-bottom">
           ${bottomLeft}
@@ -660,8 +699,9 @@ function renderShareBasket(totals) {
 
   els.shareParticipantsBar.innerHTML = state.people.map((person) => {
     const active = state.shareParticipants.has(person.id);
+    const safeColor = sanitizeHexColor(person.color);
     return `
-      <button type="button" class="share-chip ${active ? 'active' : ''}" data-share-person="${person.id}" style="--chip-color: ${person.color}" aria-pressed="${active}">
+      <button type="button" class="share-chip ${active ? 'active' : ''}" data-share-person="${person.id}" style="--chip-color: ${safeColor}" aria-pressed="${active}">
         <span class="share-chip-dot"></span>
         <span>${escapeHtml(person.name)}</span>
       </button>
@@ -679,27 +719,29 @@ function renderIndividualBaskets(totals) {
   const n = state.people.length;
   els.peopleCountDisplay.textContent = n;
   els.individualBasketsList.dataset.cols = n <= 3 ? '1' : '2';
-  els.individualBasketsList.dataset.density = n >= 7 ? 'compact' : 'normal';
+  els.individualBasketsList.dataset.density = n >= 9 ? 'ultra' : n >= 7 ? 'compact' : 'normal';
+  els.shareBasket.dataset.density = n >= 7 ? 'compact' : 'normal';
 
   els.individualBasketsList.innerHTML = state.people.map((person) => {
     const data = totals.perPerson.get(person.id);
+    const safeColor = sanitizeHexColor(person.color);
     const miniParts = [];
-    if (data.ownSubtotal > 0) miniParts.push(`Own ${fmt(data.ownSubtotal)}`);
-    if (data.sharePart > 0) miniParts.push(`Share ${fmt(data.sharePart)}`);
-    const miniLine = miniParts.length > 0 ? miniParts.join(' · ') : 'Drop items here';
+    if (data.ownSubtotal > 0) miniParts.push(`Own ${fmtHtml(data.ownSubtotal)}`);
+    if (data.sharePart > 0) miniParts.push(`Share ${fmtHtml(data.sharePart)}`);
+    const miniLine = miniParts.length > 0 ? miniParts.join(' · ') : 'Drop items';
 
     return `
-      <section class="basket-card person-basket" data-basket-id="${person.id}" style="--basket-color: ${person.color}" aria-label="${escapeHtml(person.name)} basket">
+      <section class="basket-card person-basket" data-basket-id="${person.id}" style="--basket-color: ${safeColor}" aria-label="${escapeHtml(person.name)}">
         <div class="person-top-row">
           <label class="person-color-picker" title="Change color for ${escapeHtml(person.name)}">
-            <input type="color" value="${person.color}" data-person-color="${person.id}" aria-label="Color for ${escapeHtml(person.name)}">
+            <input type="color" value="${safeColor}" data-person-color="${person.id}" aria-label="Color for ${escapeHtml(person.name)}">
           </label>
           <input type="text" class="person-name-input" value="${escapeHtml(person.name)}" data-person-name="${person.id}" aria-label="Person name">
-          <button type="button" class="basket-count-pill clickable-pill" data-inspect-basket="${person.id}" title="View items in ${escapeHtml(person.name)}'s basket">${data.ownItems.length}</button>
+          <button type="button" class="basket-count-pill clickable-pill" data-inspect-basket="${person.id}" title="View items for ${escapeHtml(person.name)}">${data.ownItems.length}</button>
         </div>
         <div class="person-bottom-row">
           <div class="person-total-line">
-            <strong class="person-total-amount">${fmt(data.total)}</strong>
+            <strong class="person-total-amount">${fmtHtml(data.total)}</strong>
           </div>
           <span class="person-mini-breakdown">${miniLine}</span>
         </div>
@@ -710,9 +752,16 @@ function renderIndividualBaskets(totals) {
 
 function renderRightFooter(totals) {
   const diff = Math.abs(totals.allocatedTotal - totals.receipt.total);
-  const complete = state.items.length > 0 && diff < 0.02;
-  els.footerAllocatedTotal.textContent = `${fmt(totals.allocatedTotal)} / ${fmt(totals.receipt.total)}`;
-  els.footerAllocatedTotal.classList.toggle('complete', complete);
+  const complete = state.items.length > 0 && !totals.hasUnsplitShare && diff < 0.02;
+  if (totals.hasUnsplitShare) {
+    els.footerAllocatedTotal.textContent = 'Select Share people';
+    els.footerAllocatedTotal.classList.remove('complete');
+    els.footerAllocatedTotal.classList.add('warn');
+  } else {
+    els.footerAllocatedTotal.textContent = `${fmt(totals.allocatedTotal)} / ${fmt(totals.receipt.total)}`;
+    els.footerAllocatedTotal.classList.toggle('complete', complete);
+    els.footerAllocatedTotal.classList.remove('warn');
+  }
 }
 
 // Basket Detail Inspector Dialog
@@ -729,15 +778,15 @@ function renderBasketDetailDialog(basketId, totals = computeTotals()) {
   const totalAmt = isShared ? totals.sharedTotals.total : totals.perPerson.get(person.id).total;
 
   els.basketDetailTitle.textContent = isShared ? 'Share' : person.name;
-  els.basketDetailSummary.innerHTML = `<span>${items.length} ${items.length === 1 ? 'item' : 'items'}</span><span>Total (incl. tax): ${fmt(totalAmt)}</span>`;
+  els.basketDetailSummary.innerHTML = `<span>${items.length} ${items.length === 1 ? 'item' : 'items'}</span><span>Total (incl. tax): ${fmtHtml(totalAmt)}</span>`;
 
   if (items.length === 0) {
-    els.basketDetailList.innerHTML = `<p style="margin: 8px 0; color: var(--text-muted); text-align: center;">No items assigned yet. Drag items from the left pane onto this card.</p>`;
+    els.basketDetailList.innerHTML = `<p class="basket-detail-empty">No items assigned yet. Drag items from the left pane onto this card.</p>`;
   } else {
     els.basketDetailList.innerHTML = items.map((item) => `
       <div class="basket-detail-row">
         <span class="basket-detail-name">${escapeHtml(item.name)}</span>
-        <span class="basket-detail-price">${fmt(item.price)}</span>
+        <span class="basket-detail-price">${fmtHtml(item.price)}</span>
         <button type="button" class="basket-item-remove" data-unassign-id="${item.id}" aria-label="Remove ${escapeHtml(item.name)}">&times;</button>
       </div>
     `).join('');
@@ -746,7 +795,7 @@ function renderBasketDetailDialog(basketId, totals = computeTotals()) {
 
 function openBasketDetailDialog(basketId) {
   renderBasketDetailDialog(basketId);
-  els.basketDetailDialog.showModal();
+  safeShowModal(els.basketDetailDialog);
 }
 
 // Assignment Actions
@@ -767,31 +816,12 @@ function setOcrLoading(loading, title = '', detail = '', pct = 0) {
   }
 }
 
-function openPasteAiDialog(noticeText = '') {
-  els.copyPromptStatus.textContent = '';
-  els.pasteAiError.textContent = '';
-  if (noticeText) {
-    els.pasteAiNotice.textContent = noticeText;
-    els.pasteAiNotice.hidden = false;
-  } else {
-    els.pasteAiNotice.textContent = '';
-    els.pasteAiNotice.hidden = true;
-  }
-  els.pasteAiDialog.showModal();
-  if (!window.matchMedia('(pointer: coarse)').matches) {
-    els.pasteAiTextarea.focus();
-  }
-}
-
 function clearReceiptData() {
   state.items = [];
   state.meta = null;
   state.sourceLabel = '';
   state.reportedTotals = { subtotal: null, total: null };
-  state.receiptImageUrl = null;
-  state.receiptImageFile = null;
-  els.receiptPreviewImg.removeAttribute('src');
-  els.btnPreviewReceipt.hidden = true;
+  setReceiptPreview(null, null);
   state.charges.scEnabled = false;
   state.charges.scAuto = false;
   state.charges.vatEnabled = false;
@@ -803,18 +833,20 @@ function clearReceiptData() {
 function validateOcrResult(result) {
   const expanded = expandReceiptItems(result.items || []);
   if (expanded.length === 0) {
-    return { ok: false, reason: 'Offline OCR could not detect any items from this receipt.' };
+    return { ok: false, reason: 'AI could not detect any items from this receipt.' };
   }
 
   const repSub = result.reportedTotals?.subtotal ?? null;
   const repTot = result.reportedTotals?.total ?? null;
   if (repSub == null && repTot == null) {
-    return { ok: false, reason: 'Offline OCR could not read the receipt total to verify all items.' };
+    return { ok: false, reason: 'AI could not read the receipt total to verify all items.' };
   }
 
   const sub = expanded.reduce((s, i) => s + i.price, 0);
-  const scRate = result.serviceCharge?.enabled ? (Number(result.serviceCharge?.rate) || 10) : 0;
-  const vatRate = result.vat?.enabled ? (Number(result.vat?.rate) || 7) : 0;
+  const scRateVal = Number(result.serviceCharge?.rate);
+  const scRate = result.serviceCharge?.enabled && Number.isFinite(scRateVal) ? scRateVal : 0;
+  const vatRateVal = Number(result.vat?.rate);
+  const vatRate = result.vat?.enabled && Number.isFinite(vatRateVal) ? vatRateVal : 0;
   const vatOnSc = result.vat?.appliesToServiceCharge !== false;
   const sc = sub * (scRate / 100);
   const vat = (vatOnSc ? sub + sc : sub) * (vatRate / 100);
@@ -824,52 +856,147 @@ function validateOcrResult(result) {
   if (repSub != null && Math.abs(sub - repSub) > tolerance) {
     return {
       ok: false,
-      reason: `Offline OCR missed items (Extracted Subtotal ${fmt(sub)} vs Receipt ${fmt(repSub)}). Cleared incomplete data — use Paste AI below for 100% accuracy.`
+      reason: `Some items appear missing (Extracted Subtotal ${fmt(sub)} vs Receipt ${fmt(repSub)}).`
     };
   }
   if (repTot != null && Math.abs(calcTot - repTot) > tolerance) {
     return {
       ok: false,
-      reason: `Offline OCR total mismatch (Extracted ${fmt(calcTot)} vs Receipt ${fmt(repTot)}). Cleared incomplete data — use Paste AI below for 100% accuracy.`
+      reason: `Extracted total did not match the receipt (Extracted ${fmt(calcTot)} vs Receipt ${fmt(repTot)}).`
     };
   }
 
   return { ok: true };
 }
 
+function openScanErrorDialog(title, message, tip) {
+  els.scanErrorTitle.textContent = title;
+  els.scanErrorMessage.textContent = message;
+  els.scanErrorTip.textContent = tip;
+  safeShowModal(els.scanErrorDialog);
+}
+
+function getImageQualityError(result) {
+  const status = result.imageStatus || 'ok';
+  if (status === 'ok') return null;
+
+  const detail = result.imageIssue || '';
+  const map = {
+    blurry: {
+      title: 'Photo Is Too Blurry',
+      message: detail || 'Some item names or prices are too blurry to read reliably.',
+      tip: 'Hold your phone steady, tap to focus on the text, and retake in good lighting.'
+    },
+    cutoff: {
+      title: 'Receipt Looks Cut Off',
+      message: detail || 'Part of the receipt (items or the bottom Total) appears cut off in the frame.',
+      tip: 'Step back slightly so the entire receipt—from the first item to the bottom Total—is visible.'
+    },
+    dark_or_glare: {
+      title: 'Too Dark or Too Much Glare',
+      message: detail || 'Shadows or glare on the receipt paper made some numbers unreadable.',
+      tip: 'Tilt the phone slightly to avoid overhead reflections and retake in even lighting.'
+    },
+    not_a_receipt: {
+      title: 'Not a Receipt',
+      message: detail || 'AI could not find a receipt or bill in this photo.',
+      tip: 'Please take a clear photo of a restaurant or store receipt, or pick one from your Photos.'
+    }
+  };
+
+  return map[status] || {
+    title: 'Could Not Read Receipt',
+    message: detail || 'The receipt image was not clear enough to extract all items.',
+    tip: 'Please retake a sharper photo with the full receipt visible.'
+  };
+}
+
 async function handleReceiptFile(file) {
   if (!file || !file.type.startsWith('image/')) {
-    showToast('Please select a valid image file.');
+    openScanErrorDialog(
+      'Unsupported File',
+      'Please select or capture a valid photo (JPG, PNG, HEIC, WebP).',
+      'Use Camera to snap the receipt directly or pick a photo from your library.'
+    );
     return;
   }
 
-  const { dataUrl } = await fileToBase64(file);
-  state.receiptImageUrl = dataUrl;
-  state.receiptImageFile = file;
-  els.receiptPreviewImg.src = dataUrl;
-  els.btnPreviewReceipt.hidden = false;
+  if (file.size < 4000) {
+    openScanErrorDialog(
+      'Image Resolution Too Low',
+      'This image file is too small to read receipt text clearly.',
+      'Please take a fresh full-resolution photo of the receipt.'
+    );
+    return;
+  }
+
+  setOcrLoading(true, 'Preparing receipt photo…', 'Optimizing clarity & size', 15);
+  let compressed;
+  try {
+    compressed = await compressReceiptImage(file);
+  } catch {
+    setOcrLoading(false);
+    openScanErrorDialog(
+      'Could Not Open Photo',
+      'Your browser could not read this image file.',
+      'Try taking a new photo with the Camera button.'
+    );
+    return;
+  }
+
+  const { base64, mimeType, previewUrl } = compressed;
+  setReceiptPreview(previewUrl, file);
+
+  if (!OCR_WORKER_URL.trim()) {
+    setOcrLoading(false);
+    clearReceiptData();
+    openScanErrorDialog(
+      'AI Scanner Not Connected Yet',
+      'Set OCR_WORKER_URL in ocr.js to your deployed Cloudflare Worker URL to enable 1-tap AI scanning.',
+      'See worker/README.md for the 2-minute Cloudflare Worker setup.'
+    );
+    return;
+  }
 
   try {
-    setOcrLoading(true, 'Scanning with Tesseract.js (Offline)…', 'Enhancing image contrast', 10);
-    const result = await parseReceiptWithTesseract(dataUrl, (msg, pct) => {
-      setOcrLoading(true, 'Scanning with Tesseract.js (Offline)…', msg, pct);
+    const result = await parseReceiptWithWorker(base64, mimeType, (msg, pct) => {
+      setOcrLoading(true, 'Reading receipt with AI…', msg, pct);
     });
 
     setOcrLoading(false);
 
-    // Strict check: never load incomplete/mismatched OCR data; clean & open Paste AI instead
-    const check = validateOcrResult(result);
-    if (!check.ok) {
+    // 1. Check AI-reported image quality (blurry, cut off, dark/glare, not a receipt)
+    const qualityErr = getImageQualityError(result);
+    if (qualityErr) {
       clearReceiptData();
-      openPasteAiDialog(check.reason);
+      openScanErrorDialog(qualityErr.title, qualityErr.message, qualityErr.tip);
       return;
     }
 
-    applyReceiptData(result, dataUrl, file);
+    // 2. Strict total verification: never allow missing/mismatched items
+    const check = validateOcrResult(result);
+    if (!check.ok) {
+      clearReceiptData();
+      openScanErrorDialog(
+        'Receipt Items Incomplete',
+        check.reason,
+        'Retake a clearer, flatter photo with the entire receipt—including the bottom Total—in frame.'
+      );
+      return;
+    }
+
+    applyReceiptData(result, previewUrl, file);
   } catch (err) {
     setOcrLoading(false);
     clearReceiptData();
-    openPasteAiDialog(`Offline OCR failed (${err.message}). Use Paste AI below for 100% accuracy.`);
+    const isOffline = !navigator.onLine;
+    openScanErrorDialog(
+      isOffline ? 'No Internet Connection' : 'AI Scan Failed',
+      isOffline
+        ? 'You appear to be offline. Connect to the internet to scan receipts with AI.'
+        : (err.message || 'Something went wrong while reading the receipt.'),
+      'Check your connection and try retaking the photo.'
+    );
   }
 }
 
@@ -973,7 +1100,7 @@ function openItemDialog(itemId = null) {
     els.editItemQtyWrap.hidden = false;
     els.btnDeleteItem.hidden = true;
   }
-  els.itemDialog.showModal();
+  safeShowModal(els.itemDialog);
   els.editItemName.focus();
 }
 
@@ -981,11 +1108,11 @@ function openAssignDialog(itemId) {
   const item = state.items.find((i) => i.id === itemId);
   if (!item) return;
 
-  els.assignItemPreview.innerHTML = `<span>${escapeHtml(item.name)}</span><span>${fmt(item.price)}</span>`;
+  els.assignItemPreview.innerHTML = `<span>${escapeHtml(item.name)}</span><span>${fmtHtml(item.price)}</span>`;
 
   const targets = [
-    { id: 'shared', label: 'Share (Split evenly)', color: '#6366f1' },
-    ...state.people.map((p) => ({ id: p.id, label: p.name, color: p.color })),
+    { id: 'shared', label: 'Share (Split evenly)', color: '#4f46e5' },
+    ...state.people.map((p) => ({ id: p.id, label: p.name, color: sanitizeHexColor(p.color) })),
     ...(item.assignedTo !== null ? [{ id: '__unassign__', label: 'Move back to Unassigned', color: '#94a3b8' }] : [])
   ];
 
@@ -1002,17 +1129,31 @@ function openAssignDialog(itemId) {
     `;
   }).join('');
 
-  els.assignDialog.showModal();
+  safeShowModal(els.assignDialog);
 }
 
 // Event Listeners
 function bindEvents() {
-  // File upload & dropzone
-  els.receiptFileInput.addEventListener('change', (e) => {
+  // Keyboard-accessible Camera & Photo Library buttons
+  document.addEventListener('click', (e) => {
+    const pickBtn = e.target.closest('[data-pick-input]');
+    if (!pickBtn) return;
+    if (pickBtn.dataset.pickInput === 'camera') {
+      els.receiptCameraInput.click();
+    } else {
+      els.receiptFileInput.click();
+    }
+  });
+
+  // File upload (Camera & Photo Library) & dropzone
+  const onFilePicked = (e) => {
     const file = e.target.files?.[0];
+    if (els.scanErrorDialog.open) els.scanErrorDialog.close();
     if (file) handleReceiptFile(file);
     e.target.value = '';
-  });
+  };
+  els.receiptFileInput.addEventListener('change', onFilePicked);
+  els.receiptCameraInput.addEventListener('change', onFilePicked);
 
   ['dragenter', 'dragover'].forEach((evt) => {
     els.uploadDropzone.addEventListener(evt, (e) => {
@@ -1037,32 +1178,8 @@ function bindEvents() {
     }
   });
 
-  // Header & hero buttons
-  els.btnOpenPasteAi.addEventListener('click', () => openPasteAiDialog());
-  els.btnHeroPasteAi.addEventListener('click', () => openPasteAiDialog());
-
-  els.btnCopyAiPrompt.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(RECEIPT_OCR_PROMPT);
-      els.copyPromptStatus.textContent = 'Prompt copied! Paste it with your receipt photo in Gemini web.';
-    } catch {
-      els.copyPromptStatus.textContent = 'Could not copy automatically — please allow clipboard access.';
-    }
-  });
-
-  els.btnImportAiJson.addEventListener('click', () => {
-    els.pasteAiError.textContent = '';
-    try {
-      const parsed = normalizeParsedReceiptJson(els.pasteAiTextarea.value, 'Gemini Web JSON');
-      els.pasteAiDialog.close();
-      els.pasteAiTextarea.value = '';
-      applyReceiptData(parsed);
-    } catch (err) {
-      els.pasteAiError.textContent = err.message;
-    }
-  });
-
-  els.btnPreviewReceipt.addEventListener('click', () => els.previewDialog.showModal());
+  // Header & preview buttons
+  els.btnPreviewReceipt.addEventListener('click', () => safeShowModal(els.previewDialog));
   els.btnRescanReceipt.addEventListener('click', rescanCurrentReceipt);
   els.btnFooterSummary.addEventListener('click', openSummaryDialog);
 
@@ -1070,7 +1187,7 @@ function bindEvents() {
   els.verifyStatusBadge.addEventListener('click', openVerifyDialog);
   els.btnVerifyViewReceipt.addEventListener('click', () => {
     els.verifyDialog.close();
-    els.previewDialog.showModal();
+    safeShowModal(els.previewDialog);
   });
   els.btnVerifyAddItem.addEventListener('click', () => {
     els.verifyDialog.close();
@@ -1086,7 +1203,8 @@ function bindEvents() {
   });
 
   els.inputServiceChargeRate.addEventListener('input', () => {
-    state.charges.scRate = Math.max(0, parseFloat(els.inputServiceChargeRate.value) || 0);
+    const val = parseFloat(els.inputServiceChargeRate.value);
+    state.charges.scRate = Number.isFinite(val) ? Math.min(100, Math.max(0, val)) : 0;
     state.charges.scAuto = false;
     els.badgeScAuto.hidden = true;
     renderAll();
@@ -1100,7 +1218,8 @@ function bindEvents() {
   });
 
   els.inputVatRate.addEventListener('input', () => {
-    state.charges.vatRate = Math.max(0, parseFloat(els.inputVatRate.value) || 0);
+    const val = parseFloat(els.inputVatRate.value);
+    state.charges.vatRate = Number.isFinite(val) ? Math.min(100, Math.max(0, val)) : 0;
     state.charges.vatAuto = false;
     els.badgeVatAuto.hidden = true;
     renderAll();
@@ -1245,17 +1364,23 @@ function bindEvents() {
     assignItem(itemId, null);
   });
 
-  // Mobile Touch Drag & Drop (instant via 6-dot grip, or 180ms hold anywhere on card)
+  // Mobile Touch Drag & Drop (GPU translate3d + rAF, instant via grip or 180ms hold)
   let touchDrag = null;
 
   const cleanupTouchDrag = () => {
     if (!touchDrag) return;
     clearTimeout(touchDrag.holdTimer);
+    if (touchDrag.rafId) cancelAnimationFrame(touchDrag.rafId);
     if (touchDrag.ghost) touchDrag.ghost.remove();
     if (touchDrag.card) touchDrag.card.classList.remove('dragging');
     document.querySelectorAll('.basket-card.drag-over').forEach((b) => b.classList.remove('drag-over'));
+    els.itemsDropArea.classList.remove('drag-over-unassign');
     document.body.classList.remove('is-dragging-item');
     touchDrag = null;
+  };
+
+  const positionGhost = (ghost, x, y) => {
+    ghost.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -135%) scale(1.03)`;
   };
 
   const activateTouchDrag = (td, x, y) => {
@@ -1269,9 +1394,8 @@ function bindEvents() {
 
     const ghost = document.createElement('div');
     ghost.className = 'touch-drag-ghost';
-    ghost.innerHTML = `<span class="touch-drag-ghost-name">${escapeHtml(item.name)}</span><span class="touch-drag-ghost-price">${fmt(item.price)}</span>`;
-    ghost.style.left = `${x}px`;
-    ghost.style.top = `${y}px`;
+    ghost.innerHTML = `<span class="touch-drag-ghost-name">${escapeHtml(item.name)}</span><span class="touch-drag-ghost-price">${fmtHtml(item.price)}</span>`;
+    positionGhost(ghost, x, y);
     document.body.appendChild(ghost);
     td.ghost = ghost;
   };
@@ -1289,10 +1413,14 @@ function bindEvents() {
       card,
       startX: touch.clientX,
       startY: touch.clientY,
+      lastX: touch.clientX,
+      lastY: touch.clientY,
       fromGrip,
       active: false,
       ghost: null,
       hoveredBasket: null,
+      overUnassign: false,
+      rafId: null,
       holdTimer: null
     };
     touchDrag = td;
@@ -1316,7 +1444,6 @@ function bindEvents() {
 
     if (!touchDrag.active) {
       if (Math.hypot(dx, dy) > 10) {
-        // User is scrolling the page — cancel hold timer
         clearTimeout(touchDrag.holdTimer);
         touchDrag = null;
       }
@@ -1324,30 +1451,46 @@ function bindEvents() {
     }
 
     e.preventDefault();
-    touchDrag.ghost.style.left = `${touch.clientX}px`;
-    touchDrag.ghost.style.top = `${touch.clientY}px`;
+    touchDrag.lastX = touch.clientX;
+    touchDrag.lastY = touch.clientY;
 
-    const elUnder = document.elementFromPoint(touch.clientX, touch.clientY);
-    const basket = elUnder ? elUnder.closest('.basket-card[data-basket-id]') : null;
+    if (!touchDrag.rafId) {
+      touchDrag.rafId = requestAnimationFrame(() => {
+        if (!touchDrag || !touchDrag.active) return;
+        touchDrag.rafId = null;
+        const { lastX, lastY } = touchDrag;
+        positionGhost(touchDrag.ghost, lastX, lastY);
 
-    if (touchDrag.hoveredBasket && touchDrag.hoveredBasket !== basket) {
-      touchDrag.hoveredBasket.classList.remove('drag-over');
+        const elUnder = document.elementFromPoint(lastX, lastY);
+        const basket = elUnder ? elUnder.closest('.basket-card[data-basket-id]') : null;
+        const item = state.items.find((i) => i.id === touchDrag.itemId);
+        const overUnassign = !basket && Boolean(item?.assignedTo) && Boolean(elUnder?.closest('#itemsDropArea'));
+
+        if (touchDrag.hoveredBasket && touchDrag.hoveredBasket !== basket) {
+          touchDrag.hoveredBasket.classList.remove('drag-over');
+        }
+        if (basket) {
+          basket.classList.add('drag-over');
+        }
+        els.itemsDropArea.classList.toggle('drag-over-unassign', overUnassign);
+        touchDrag.hoveredBasket = basket;
+        touchDrag.overUnassign = overUnassign;
+      });
     }
-    if (basket) {
-      basket.classList.add('drag-over');
-    }
-    touchDrag.hoveredBasket = basket;
   }, { passive: false });
 
-  document.addEventListener('touchend', () => {
-    if (!touchDrag) return;
+  document.addEventListener('touchend', (e) => {
+    if (!touchDrag || e.touches.length > 0) return;
     const td = touchDrag;
     if (td.active) {
       suppressClickUntil = Date.now() + 350;
       const targetBasketId = td.hoveredBasket?.dataset.basketId || null;
+      const shouldUnassign = td.overUnassign;
       cleanupTouchDrag();
       if (targetBasketId) {
         assignItem(td.itemId, targetBasketId);
+      } else if (shouldUnassign) {
+        assignItem(td.itemId, null);
       }
     } else {
       cleanupTouchDrag();
@@ -1505,7 +1648,7 @@ function bindEvents() {
       }
       showToast('Item updated');
     } else {
-      const qty = Math.max(1, parseInt(els.editItemQty.value, 10) || 1);
+      const qty = Math.max(1, Math.min(50, parseInt(els.editItemQty.value, 10) || 1));
       const added = expandReceiptItems([{ name, qty, lineTotal: price * qty }], 'manual');
       state.items.push(...added);
       showToast(qty > 1 ? `Added ${qty} individual items` : 'Item added');

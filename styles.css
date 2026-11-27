@@ -5,8 +5,8 @@
   --border: #e6e6eb;
   --border-strong: #d4d4dc;
   --text: #111114;
-  --text-muted: #646470;
-  --text-light: #9696a3;
+  --text-muted: #5c5c68;
+  --text-light: #71717e;
   --ink: #18181b;
   --ink-hover: #27272a;
   --accent: #2563eb;
@@ -28,7 +28,7 @@
   --shadow-sm: 0 4px 12px rgba(17, 17, 20, 0.06);
   --shadow-md: 0 16px 40px rgba(17, 17, 20, 0.14);
   --header-h: 52px;
-  --font-sans: 'Noto Sans Thai', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-sans: 'Inter', 'Noto Sans Thai', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
 *, *::before, *::after {
@@ -190,6 +190,11 @@ button, input, select, textarea {
 }
 .btn-danger-ghost:hover {
   background: var(--danger-soft);
+}
+
+.mobile-only-btn,
+.scan-btn-label-mobile {
+  display: none;
 }
 
 .link-btn {
@@ -1366,13 +1371,63 @@ body.is-dragging-item .person-basket {
   color: var(--success);
 }
 
+.footer-check-value.warn {
+  color: var(--warning);
+}
+
+.basket-detail-empty {
+  margin: 8px 0;
+  color: var(--text-muted);
+  text-align: center;
+  font-size: 13px;
+}
+
+/* Focus-visible rings on composite controls */
+.rate-input-wrap:has(:focus-visible),
+.search-box:has(:focus-visible),
+.person-color-picker:has(:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Desktop ultra-dense grid when >= 9 people */
+.individual-baskets-grid[data-density="ultra"] {
+  gap: 4px;
+}
+
+.individual-baskets-grid[data-density="ultra"] .person-basket {
+  padding: 4px 7px;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.individual-baskets-grid[data-density="ultra"] .person-top-row {
+  flex: 1;
+}
+
+.individual-baskets-grid[data-density="ultra"] .person-bottom-row {
+  margin-top: 0;
+  flex-shrink: 0;
+}
+
+.individual-baskets-grid[data-density="ultra"] .person-mini-breakdown {
+  display: none;
+}
+
+@media (pointer: coarse) {
+  .item-grip {
+    touch-action: none;
+  }
+}
+
 /* Native <dialog> Modals (following modern-web-guidance) */
 dialog {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 0;
   width: min(460px, calc(100vw - 32px));
-  max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 32px);
   background: var(--surface);
   color: var(--text);
   box-shadow: var(--shadow-md);
@@ -1620,7 +1675,7 @@ dialog::backdrop {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   padding: 12px;
-  font-family: 'Noto Sans Thai', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Noto Sans Thai', monospace;
   font-size: 12.5px;
   line-height: 1.55;
   resize: vertical;
@@ -1807,6 +1862,30 @@ dialog::backdrop {
     display: inline;
   }
 
+  .mobile-only-btn {
+    display: inline-flex;
+  }
+
+  .desktop-only-btn,
+  .scan-btn-label-desktop {
+    display: none !important;
+  }
+
+  .header-actions .desktop-scan-btn {
+    background: var(--surface);
+    border-color: var(--border-strong);
+    color: var(--text);
+  }
+
+  .header-actions .desktop-scan-btn:hover {
+    background: var(--surface-subtle);
+    border-color: var(--border-strong);
+  }
+
+  .header-actions .scan-btn-label-mobile {
+    display: inline;
+  }
+
   /* Flatten panes via display: contents so mobile orders:
      1. Share + Individual (top, ultra-compact)
      2. Items toolbar + grid (middle, unassigned on top)
@@ -1834,19 +1913,22 @@ dialog::backdrop {
     padding: 20px 14px;
   }
 
-  /* 1. TOP: Ultra-compact Share + Individual (~25-30% viewport height), sticky for mobile drag & drop */
+  /* 1. TOP: Ultra-compact Share + Individual (~25-30% viewport height), sticky & capped for mobile drag & drop */
   .baskets-board {
     order: 1;
     position: sticky;
     top: var(--header-h);
     z-index: 20;
     background: var(--bg);
-    overflow: visible;
+    max-height: 40dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 6px 0 8px;
     margin-top: -6px;
     gap: 6px;
     flex: none;
     border-bottom: 1px solid var(--border);
+    box-shadow: 0 4px 12px rgba(17, 17, 20, 0.05);
   }
 
   .share-basket {
@@ -1900,8 +1982,19 @@ dialog::backdrop {
   }
 
   .share-chip {
-    padding: 1px 6px;
-    font-size: 10px;
+    padding: 4px 9px;
+    font-size: 11px;
+  }
+
+  .stepper-btn {
+    width: 34px;
+    height: 32px;
+  }
+
+  .icon-close-btn,
+  .basket-item-remove {
+    width: 36px;
+    height: 36px;
   }
 
   .people-header {
@@ -2038,8 +2131,8 @@ dialog::backdrop {
   }
 
   .item-icon-btn {
-    width: 30px;
-    height: 30px;
+    width: 36px;
+    height: 36px;
   }
 
   /* 3. BOTTOM: Pricing Summary + Copy Split Summary */
@@ -2097,7 +2190,8 @@ dialog::backdrop {
   .summary-textarea,
   .form-field input,
   .form-field select,
-  .search-box input {
+  .search-box input,
+  .rate-input-wrap input {
     font-size: 16px;
   }
 }
@@ -2113,6 +2207,34 @@ dialog::backdrop {
 
   .form-row-2 {
     grid-template-columns: 1fr;
+  }
+
+  .dialog-footer.dialog-footer-stack {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .dialog-footer.dialog-footer-stack .dialog-footer-right {
+    margin-left: 0;
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .dialog-footer.dialog-footer-stack .btn {
+    flex: 1;
+    min-height: 38px;
+  }
+
+  .upload-cta-row {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .upload-cta-row .btn {
+    width: 100%;
   }
 
   .toast {
