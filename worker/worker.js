@@ -142,7 +142,7 @@ async function callGemini(apiKey, model, imageBase64, mimeType) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey
+      'x-goog-api-key': String(apiKey).trim()
     },
     body: JSON.stringify({
       contents: [
@@ -163,7 +163,14 @@ async function callGemini(apiKey, model, imageBase64, mimeType) {
   if (!resp.ok) {
     const errText = await resp.text().catch(() => '');
     console.error(`Gemini error ${resp.status} (${model}):`, errText.slice(0, 500));
-    throw new Error(`UPSTREAM_${resp.status}`);
+    let detail = '';
+    try {
+      const errJson = JSON.parse(errText);
+      detail = String(errJson.error?.message || '').slice(0, 140);
+    } catch { /* ignore */ }
+    const err = new Error(`UPSTREAM_${resp.status}`);
+    err.detail = detail;
+    throw err;
   }
 
   const data = await resp.json();
@@ -300,7 +307,8 @@ export default {
         clientMsg = 'Gemini API quota or rate limit reached (429). Please retry in a moment or check Google AI Studio billing.';
       } else if (code === 'UPSTREAM_403' || code === 'UPSTREAM_401' || code === 'UPSTREAM_400') {
         status = 502;
-        clientMsg = `Gemini API key or request rejected (${code}). Check GEMINI_API_KEY in Cloudflare Secrets.`;
+        const extra = err?.detail ? `: ${err.detail}` : '';
+        clientMsg = `Gemini rejected request (${code})${extra}`;
       } else if (code === 'UPSTREAM_404') {
         status = 502;
         clientMsg = 'Gemini model not available (404).';
